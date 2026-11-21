@@ -448,14 +448,39 @@ def clean_workspace(workspace, excluded, matches, apply):
     return files, removed, errors
 
 
+def select_elements(elements):
+    print("Dependencies available for checking")
+    for number, element in enumerate(elements, 1):
+        print(f"  {number}. {element}")
+
+    while True:
+        answer = input(
+            "Enter numbers separated by spaces or commas, type all, or press Enter to skip: "
+        ).strip().casefold()
+        if answer in {"", "q"}:
+            return []
+        if answer == "all":
+            return elements
+        try:
+            numbers = {int(part) for part in answer.replace(",", " ").split()}
+        except ValueError:
+            numbers = set()
+        if numbers and all(1 <= number <= len(elements) for number in numbers):
+            return [element for number, element in enumerate(elements, 1) if number in numbers]
+        print(f"Choose numbers from 1 to {len(elements)}, or type all.")
+
+
 def arguments():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--project", type=Path, default=Path.cwd(), help="directory with project.conf")
     parser.add_argument("--bst", default="bst", help="BuildStream executable")
     parser.add_argument("--target", required=True, action="append", metavar="ELEMENT.bst",
                         help="root element whose transitive dependencies to clean; repeatable")
-    parser.add_argument("--dependency", action="append", metavar="ELEMENT.bst",
-                        help="clean only this selected dependency; repeatable")
+    selection = parser.add_mutually_exclusive_group()
+    selection.add_argument("--dependency", action="append", metavar="ELEMENT.bst",
+                           help="clean only this selected dependency; repeatable")
+    selection.add_argument("--select", action="store_true",
+                           help="list dependencies and prompt for which ones to check")
     parser.add_argument("--include-targets", action="store_true",
                         help="make root elements eligible for cleanup")
     parser.add_argument("--workspace-dir", type=Path, default=Path(".bst-comment-workspaces"),
@@ -519,13 +544,16 @@ def main():
         try:
             if element in registered or ":" in element or has_declared_sources(root, element):
                 elements.append(element)
-            elif args.dependency:
+            elif args.dependency or args.select:
                 print(f"Skipped {element}: no non-empty top-level sources list.")
         except (OSError, ValueError, yaml.YAMLError) as error:
             print(f"ERROR {element}: {error}", file=sys.stderr)
             errors += 1
 
     print(f"{len(elements)} workspace candidate(s) from {len(pipeline)} selected element(s).", flush=True)
+    if args.select and elements:
+        elements = select_elements(elements)
+        print(f"Selected {len(elements)} workspace candidate(s).", flush=True)
     total_files = total_comments = 0
     for number, element in enumerate(elements, 1):
         print(f"[{number}/{len(elements)}] {element}", flush=True)

@@ -47,9 +47,20 @@ to `.bst-comment-workspaces` under the BuildStream project. Specify
 
 ### Select specific dependencies
 
-Repeat `--dependency` to clean only the named elements. Use the exact
-BuildStream element names, including paths under the element directory or
-junction prefixes where applicable. Each name must belong to the target's
+Use `--select` to list workspace candidates before opening any workspace.
+
+```bash
+python bst_comment_cleaner.py --project /path/to/project \
+  --target app.bst --words badwords.txt --select
+```
+
+Enter the numbers of the dependencies you want to check, separated by spaces
+or commas. Type `all` to select every candidate, or press Enter to skip them
+all. Add `--apply` to remove matches in the selected workspaces.
+
+For scripted use, repeat `--dependency` to clean only the named elements.
+Use the exact BuildStream element names, including paths under the element
+directory or junction prefixes where applicable. Each name must belong to the target's
 dependency graph. Dependencies of the selected elements are cleaned only
 when named explicitly. With `--include-targets`, you can also name a root
 element in the selection.
@@ -60,7 +71,7 @@ python bst_comment_cleaner.py --project /path/to/project \
   --words badwords.txt --apply --step
 ```
 
-Omit `--dependency` to clean the entire dependency graph.
+Omit both `--select` and `--dependency` to process the entire dependency graph.
 
 For local descriptors, the cleaner uses a non-empty top-level `sources:`
 list to identify elements that can open new workspaces. For dependencies in
