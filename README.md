@@ -19,9 +19,11 @@ cp badwords.example.txt badwords.txt
 ```
 
 Edit `badwords.txt` as UTF-8 with one literal word or phrase per line. Blank
-lines are ignored. Matching is case-insensitive and uses whole-word boundaries
-by default. Use `--case-sensitive` or `--substring` to change matching, or add
-individual entries with repeatable `--word` options.
+lines are ignored. Matching ignores case by default. The `FIXME` entry
+matches `FIXME`, `fixme`, and `FixMe`. Pass `--ignore-case` to select that
+behavior explicitly or `--case-sensitive` to require exact capitalization.
+Use `--substring` to match inside larger words, or add individual entries
+with repeatable `--word` options.
 
 ## Run
 

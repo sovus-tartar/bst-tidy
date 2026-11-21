@@ -461,7 +461,12 @@ def arguments():
     parser.add_argument("--words", type=Path, help="UTF-8 file with one word or phrase per line")
     parser.add_argument("--word", action="append", default=[], help="additional literal; repeatable")
     parser.add_argument("--substring", action="store_true", help="match inside larger words")
-    parser.add_argument("--case-sensitive", action="store_true")
+    case = parser.add_mutually_exclusive_group()
+    case.add_argument("--ignore-case", dest="case_sensitive", action="store_false",
+                      help="ignore capitalization when matching words (default)")
+    case.add_argument("--case-sensitive", action="store_true",
+                      help="require exact capitalization when matching words")
+    parser.set_defaults(case_sensitive=False)
     parser.add_argument("--apply", action="store_true", help="write edits; otherwise report matches")
     parser.add_argument("--step", action="store_true", help="pause before each workspace")
     args = parser.parse_args()
