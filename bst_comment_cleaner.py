@@ -79,28 +79,13 @@ class Edit:
     comments: int
 
 
-def blank(text, continuation=False):
-    """Keep physical line endings and maintain a separator between tokens."""
-    parts = []
-    start = 0
-    for newline in NEWLINE.finditer(text):
-        width = newline.start() - start
-        if continuation:
-            parts.append(" " * max(width - 1, 0) + "\\")
-        else:
-            parts.append(" " * width)
-        parts.append(newline.group())
-        start = newline.end()
-    parts.append(" " * (len(text) - start))
-    return "".join(parts)
-
-
-def replace_comments(text, comments, continuation=False):
+def replace_comments(text, comments):
     parts = []
     cursor = 0
     for comment in comments:
         parts.append(text[cursor:comment.start])
-        parts.append(blank(text[comment.start:comment.end], continuation))
+        original = text[comment.start:comment.end]
+        parts.append(re.sub(r"[^\r\n]+", lambda chunk: " " * len(chunk[0]), original))
         cursor = comment.end
     parts.append(text[cursor:])
     return "".join(parts)
@@ -187,6 +172,8 @@ def c_tokens(text):
     previous = ""
     at_line_start = True
     directive = False
+    in_directive = False
+    line_control = False
     header = False
     probe = False
     separated = False
@@ -203,7 +190,10 @@ def c_tokens(text):
             raise ValueError("unterminated C block comment")
         if kind in {"line_comment", "block_comment"}:
             start = source.physical_at(cursor)
-            stop = source.physical_at(end - 1) + 1
+            if kind == "line_comment":
+                stop = source.physical_at(end)
+            else:
+                stop = source.physical_at(end - 1) + 1
             body = spelling[2:] if kind == "line_comment" else spelling[2:-2]
             try:
                 body = body.encode("latin-1").decode("utf-8")
@@ -214,14 +204,25 @@ def c_tokens(text):
         elif kind == "space":
             separated = True
         elif kind == "newline":
-            yield ("newline", spelling, False)
-            at_line_start, directive, header, probe, separated = True, False, False, False, False
+            if in_directive:
+                # A line-control directive assigns a number to the following
+                # physical line, so its ending line must stay the same.
+                line = bisect_right(source.lines, source.physical_at(cursor)) + 1
+                yield ("directive-end", line if line_control else None)
+            at_line_start = separated = True
+            directive = in_directive = line_control = header = probe = False
         else:
             if kind == "punct" and spelling in {'"', "'"}:
                 raise ValueError("unterminated C/C++ string or character literal")
             if kind == "raw":
                 end, raw = raw_string_end(source, end - 1)
                 spelling = spelling[:-1] + raw
+            starts_directive = at_line_start and spelling in {"#", "%:"}
+            if starts_directive:
+                yield ("directive-start",)
+                in_directive = True
+            if directive:
+                line_control = spelling == "line" or kind == "number"
             yield (kind, spelling, separated)
             header = (
                 directive and spelling in DIRECTIVE_HEADERS
@@ -229,11 +230,38 @@ def c_tokens(text):
                 or spelling == "import" and (at_line_start or previous in {"export", ";", "}"})
             )
             probe = spelling in HEADER_PROBES
-            directive = at_line_start and spelling in {"#", "%:"}
+            directive = starts_directive
             at_line_start = separated = False
             previous = spelling
         cursor = end
+    if in_directive:
+        yield ("directive-end", len(source.lines) + 1 if line_control else None)
 
+
+def remove_c_comments(text, tokens, comments):
+    expected = [token for token in tokens if not isinstance(token, Comment)]
+    kept = []
+
+    def remove_batch(current, batch):
+        candidate = replace_comments(current, batch)
+        try:
+            actual = [token for token in c_tokens(candidate) if not isinstance(token, Comment)]
+            if actual == expected:
+                return candidate
+        except ValueError:
+            # Removing a comment can expose an ambiguous line splice.
+            pass
+
+        if len(batch) == 1:
+            kept.append(batch[0])
+            return current
+
+        # A failed batch can still contain edits that preserve preprocessing.
+        middle = len(batch) // 2
+        current = remove_batch(current, batch[:middle])
+        return remove_batch(current, batch[middle:])
+
+    return remove_batch(text, comments), kept
 
 
 class BstCommentLoader(yaml.SafeLoader):
@@ -326,7 +354,21 @@ def rewrite(path, data, matches, workspace):
     if not selected:
         return None, protected
 
-    result = replace_comments(text, selected, continuation=not (is_python or is_bst))
+    removed = len(selected)
+    if is_bst or is_python:
+        result = replace_comments(text, selected)
+    else:
+        result, kept = remove_c_comments(text, tokens, selected)
+        for comment in kept:
+            print(
+                f"  Kept {path.relative_to(workspace)}:{comment.line} "
+                "(removal could change C/C++ preprocessing)"
+            )
+        protected += len(kept)
+        removed -= len(kept)
+        if not removed:
+            return None, protected
+
     encoded = result.encode(encoding)
     if is_bst:
         # Consume the parser events to reject malformed descriptors before writing.
@@ -340,12 +382,7 @@ def rewrite(path, data, matches, workspace):
             original_ast, include_attributes=True
         ):
             raise ValueError("Python syntax tree changed")
-    else:
-        before = [token for token in tokens if not isinstance(token, Comment)]
-        after = [token for token in c_tokens(result) if not isinstance(token, Comment)]
-        if before != after:
-            raise ValueError("C/C++ preprocessing tokens or separators changed")
-    return Edit(path, data, encoded, len(selected)), protected
+    return Edit(path, data, encoded, removed), protected
 
 
 def walk(root, excluded):

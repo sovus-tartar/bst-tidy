@@ -112,6 +112,9 @@ junctions, BuildStream determines whether a workspace can be opened.
 The cleaner blanks matching comments while preserving source line numbers.
 It compares Python syntax trees, C/C++ preprocessing tokens, or YAML tokens
 before writing. In `.bst` files, hashes inside YAML scalar values are kept.
+C/C++ multiline comments are blanked without inserting backslashes.
+The cleaner keeps and reports a matching comment if blanking it could change
+preprocessing, such as ending a macro definition before its replacement text.
 Matching Python shebangs and encoding declarations are kept and reported
 because they can affect execution. The cleaner reports failures and exits
 with status 1 if any issues remain. Use `--help` for the available options.
