@@ -1,7 +1,8 @@
 # BuildStream comment cleaner
 
-Remove matching comments from Python, C, and C++ sources in a BuildStream
-target's workspaces. BuildStream resolves build and runtime dependencies to
+Remove matching comments from Python, C, and C++ sources and YAML comments
+from `.bst` descriptors. Check the project tree, a BuildStream target's
+workspaces, or both. BuildStream resolves build and runtime dependencies to
 every depth. The cleaner processes shared dependencies once and skips the root
 targets unless you pass `--include-targets`.
 
@@ -40,10 +41,25 @@ python bst_comment_cleaner.py --project /path/to/project \
   --target app.bst --words badwords.txt --apply --step
 ```
 
-Repeat `--target` to select multiple roots. Both preview and apply reuse
-registered workspaces and can open missing workspaces. New workspaces default
+Repeat `--target` to select multiple roots. When targets are given, preview and
+apply reuse registered workspaces and can open missing ones. New workspaces default
 to `.bst-comment-workspaces` under the BuildStream project. Specify
 `--workspace-dir` to change that location. Workspaces remain open for review.
+
+### Check the project root
+
+Use `--scan-project` to check the project directory and its subdirectories.
+The project root is the directory containing `project.conf`. This scan skips
+registered workspace directories and the configured directory for new
+workspaces.
+
+```bash
+python bst_comment_cleaner.py --project /path/to/project \
+  --scan-project --words badwords.txt
+```
+
+Add `--target app.bst --select` to check selected workspaces as well. Add
+`--apply` to remove matching comments.
 
 ### Select specific dependencies
 
@@ -78,7 +94,8 @@ list to identify elements that can open new workspaces. For dependencies in
 junctions, BuildStream determines whether a workspace can be opened.
 
 The cleaner blanks matching comments while preserving source line numbers.
-It compares Python syntax trees or C/C++ preprocessing tokens before writing.
+It compares Python syntax trees, C/C++ preprocessing tokens, or YAML tokens
+before writing. In `.bst` files, hashes inside YAML scalar values are kept.
 Matching Python shebangs and encoding declarations are kept and reported
 because they can affect execution. The cleaner reports failures and exits
 with status 1 if any issues remain. Use `--help` for the available options.

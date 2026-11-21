@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Remove matching Python, C, and C++ comments from BuildStream dependencies.
+"""Remove matching comments from BuildStream projects and workspaces.
 
 Requires Python 3.9+, PyYAML, and the project's BuildStream CLI. Use a Python
 interpreter new enough to parse the Python sources being cleaned. Dry runs
@@ -10,6 +10,7 @@ and preserves them because they can affect execution.
 
 import argparse
 import ast
+import codecs
 from bisect import bisect_left, bisect_right
 from dataclasses import dataclass
 from io import BytesIO, StringIO
@@ -26,6 +27,7 @@ import yaml
 
 
 IGNORED_DIRS = {".git", ".hg", ".svn", ".bst", ".bst2", "__pycache__"}
+BST_SUFFIX = ".bst"
 PYTHON_SUFFIXES = {".py", ".pyw", ".pyi"}
 C_SUFFIXES = {
     ".c", ".h", ".cc", ".cpp", ".cxx", ".c++", ".cp", ".hh", ".hpp",
@@ -33,6 +35,9 @@ C_SUFFIXES = {
     ".cxxm", ".c++m",
 }
 NEWLINE = re.compile(r"\r\n|[\r\n]")
+YAML_NEWLINE = re.compile(r"\r\n|[\r\n\x85\u2028\u2029]")
+YAML_COMMENT = re.compile(r"#[^\r\n\x85\u2028\u2029]*")
+YAML_DIRECTIVE_COMMENT = re.compile(r"(?<=[ \t])#[^\r\n\x85\u2028\u2029]*")
 SPLICE = re.compile(r"\\(?:\r\n|[\r\n])")
 NONSTANDARD_SPLICE = re.compile(r"\\[ \t\v\f]+[\r\n]")
 TRIGRAPH = re.compile(r"\?\?[=/'()!<>-]")
@@ -230,9 +235,72 @@ def c_tokens(text):
         cursor = end
 
 
+
+class BstCommentLoader(yaml.SafeLoader):
+    """Capture comments where the PyYAML scanner consumes ignored input."""
+
+    def __init__(self, text):
+        self.text = text
+        self.lines = [ending.end() for ending in YAML_NEWLINE.finditer(text)]
+        self.comments = []
+        super().__init__(text)
+
+    def record_comments(self, start, pattern=YAML_COMMENT):
+        for match in pattern.finditer(self.text, start, self.index):
+            line = bisect_right(self.lines, match.start()) + 1
+            self.comments.append(Comment(match.start(), match.end(), line, match.group()[1:]))
+
+    def scan_to_next_token(self):
+        start = self.index
+        super().scan_to_next_token()
+        self.record_comments(start)
+
+    def scan_block_scalar_ignored_line(self, start_mark):
+        start = self.index
+        super().scan_block_scalar_ignored_line(start_mark)
+        self.record_comments(start)
+
+    def scan_directive(self):
+        token = super().scan_directive()
+        pattern = YAML_COMMENT if token.name in {"YAML", "TAG"} else YAML_DIRECTIVE_COMMENT
+        self.record_comments(token.end_mark.index, pattern)
+        return token
+
+
+def bst_comments(text):
+    loader = BstCommentLoader(text)
+    try:
+        while loader.check_token():
+            loader.get_token()
+        return loader.comments
+    finally:
+        loader.dispose()
+
+
+def yaml_token_values(text):
+    return [
+        (type(token), {
+            key: value for key, value in vars(token).items()
+            if key not in {"start_mark", "end_mark"}
+        })
+        for token in yaml.scan(text, Loader=yaml.SafeLoader)
+    ]
+
+
 def rewrite(path, data, matches, workspace):
-    is_python = path.suffix.lower() in PYTHON_SUFFIXES or bool(PYTHON_SHEBANG.match(data))
-    if is_python:
+    is_bst = path.suffix.lower() == BST_SUFFIX
+    is_python = not is_bst and (
+        path.suffix.lower() in PYTHON_SUFFIXES or bool(PYTHON_SHEBANG.match(data))
+    )
+    if is_bst:
+        encoding = "utf-8"
+        if data.startswith(codecs.BOM_UTF16_LE):
+            encoding = "utf-16-le"
+        elif data.startswith(codecs.BOM_UTF16_BE):
+            encoding = "utf-16-be"
+        text = data.decode(encoding)
+        comments = bst_comments(text)
+    elif is_python:
         encoding, _ = tokenize.detect_encoding(BytesIO(data).readline)
         text = data.decode(encoding)
         if text.encode(encoding) != data:
@@ -258,9 +326,15 @@ def rewrite(path, data, matches, workspace):
     if not selected:
         return None, protected
 
-    result = replace_comments(text, selected, continuation=not is_python)
+    result = replace_comments(text, selected, continuation=not (is_python or is_bst))
     encoded = result.encode(encoding)
-    if is_python:
+    if is_bst:
+        # Consume the parser events to reject malformed descriptors before writing.
+        for _ in yaml.parse(text, Loader=yaml.SafeLoader):
+            pass
+        if yaml_token_values(text) != yaml_token_values(result):
+            raise ValueError("BuildStream descriptor YAML tokens changed")
+    elif is_python:
         new_ast = ast.parse(encoded, filename=str(path))
         if ast.dump(new_ast, include_attributes=True) != ast.dump(
             original_ast, include_attributes=True
@@ -293,7 +367,7 @@ def walk(root, excluded):
 
 
 def source_data(path):
-    if path.suffix.lower() in PYTHON_SUFFIXES | C_SUFFIXES:
+    if path.suffix.lower() in PYTHON_SUFFIXES | C_SUFFIXES | {BST_SUFFIX}:
         return path.read_bytes()
     if not path.suffix:
         with path.open("rb") as stream:
@@ -424,16 +498,16 @@ def save(edit):
             temporary.unlink(missing_ok=True)
 
 
-def clean_workspace(workspace, excluded, matches, apply):
-    if not workspace.is_dir():
-        raise ValueError(f"workspace directory is missing: {workspace}")
+def clean_tree(directory, excluded, matches, apply):
+    if not directory.is_dir():
+        raise ValueError(f"source directory is missing: {directory}")
     files = removed = errors = 0
-    for path in walk(workspace, excluded):
+    for path in walk(directory, excluded):
         try:
             data = source_data(path)
             if data is None:
                 continue
-            edit, protected = rewrite(path, data, matches, workspace)
+            edit, protected = rewrite(path, data, matches, directory)
             errors += protected
             if edit is None:
                 continue
@@ -441,9 +515,9 @@ def clean_workspace(workspace, excluded, matches, apply):
                 save(edit)
             files += 1
             removed += edit.comments
-            print(f"  {path.relative_to(workspace)}: {edit.comments} matching comment(s)")
-        except (OSError, ValueError, SyntaxError, tokenize.TokenError, RecursionError) as error:
-            print(f"  ERROR {path.relative_to(workspace)}: {error}", file=sys.stderr)
+            print(f"  {path.relative_to(directory)}: {edit.comments} matching comment(s)")
+        except (OSError, ValueError, SyntaxError, tokenize.TokenError, RecursionError, yaml.YAMLError) as error:
+            print(f"  ERROR {path.relative_to(directory)}: {error}", file=sys.stderr)
             errors += 1
     return files, removed, errors
 
@@ -474,8 +548,10 @@ def arguments():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--project", type=Path, default=Path.cwd(), help="directory with project.conf")
     parser.add_argument("--bst", default="bst", help="BuildStream executable")
-    parser.add_argument("--target", required=True, action="append", metavar="ELEMENT.bst",
+    parser.add_argument("--target", action="append", metavar="ELEMENT.bst",
                         help="root element whose transitive dependencies to clean; repeatable")
+    parser.add_argument("--scan-project", action="store_true",
+                        help="check comments under the project root; works without --target")
     selection = parser.add_mutually_exclusive_group()
     selection.add_argument("--dependency", action="append", metavar="ELEMENT.bst",
                            help="clean only this selected dependency; repeatable")
@@ -495,8 +571,13 @@ def arguments():
                       help="require exact capitalization when matching words")
     parser.set_defaults(case_sensitive=False)
     parser.add_argument("--apply", action="store_true", help="write edits; otherwise report matches")
-    parser.add_argument("--step", action="store_true", help="pause before each workspace")
+    parser.add_argument("--step", action="store_true", help="pause before checking each directory")
     args = parser.parse_args()
+    if not args.target:
+        if not args.scan_project:
+            parser.error("provide --target or --scan-project")
+        if args.dependency or args.select or args.include_targets:
+            parser.error("--dependency, --select, and --include-targets require --target")
     if args.step and not sys.stdin.isatty():
         parser.error("--step requires an interactive terminal")
     return args
@@ -522,9 +603,9 @@ def main():
         if destination == project or project.is_relative_to(destination):
             raise ValueError("--workspace-dir cannot contain the project directory")
 
-        root = element_root(project)
         bst = BuildStream(args.bst, project)
-        pipeline = bst.dependency_pipeline(args.target, args.include_targets)
+        root = element_root(project) if args.target else project
+        pipeline = bst.dependency_pipeline(args.target, args.include_targets) if args.target else []
         if args.dependency:
             selected = set(args.dependency)
             missing = selected.difference(pipeline)
@@ -550,11 +631,24 @@ def main():
             print(f"ERROR {element}: {error}", file=sys.stderr)
             errors += 1
 
-    print(f"{len(elements)} workspace candidate(s) from {len(pipeline)} selected element(s).", flush=True)
+    if args.target:
+        print(f"{len(elements)} workspace candidate(s) from {len(pipeline)} selected element(s).", flush=True)
     if args.select and elements:
         elements = select_elements(elements)
         print(f"Selected {len(elements)} workspace candidate(s).", flush=True)
     total_files = total_comments = 0
+    if args.scan_project:
+        print(f"Project root: {project}", flush=True)
+        if args.step and input("Press Enter to proceed, or type q to stop: ").strip().casefold() == "q":
+            return 130
+        try:
+            total_files, total_comments, issues = clean_tree(project, excluded, matches, args.apply)
+            errors += issues
+        except failures as error:
+            print(f"  ERROR: {error}", file=sys.stderr)
+            errors += 1
+        excluded.add(project)
+
     for number, element in enumerate(elements, 1):
         print(f"[{number}/{len(elements)}] {element}", flush=True)
         if args.step:
@@ -571,8 +665,11 @@ def main():
                     print("  Skipped: BuildStream reports that this element has no sources.")
                     continue
                 excluded.add(workspace)
+            if args.scan_project and workspace == project:
+                print("  Skipped: this workspace is the project root already checked above.")
+                continue
             print(f"  Workspace: {workspace}", flush=True)
-            files, comments, issues = clean_workspace(workspace, excluded, matches, args.apply)
+            files, comments, issues = clean_tree(workspace, excluded, matches, args.apply)
             total_files += files
             total_comments += comments
             errors += issues
