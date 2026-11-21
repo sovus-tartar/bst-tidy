@@ -41,8 +41,8 @@ python bst_comment_cleaner.py --project /path/to/project \
   --target app.bst --words badwords.txt --apply --step
 ```
 
-Repeat `--target` to select multiple roots. When targets are given, preview and
-apply reuse registered workspaces and can open missing ones. New workspaces default
+Repeat `--target` to select multiple roots. A workspace scan reuses registered
+workspaces and can open missing ones in preview or apply mode. New workspaces default
 to `.bst-comment-workspaces` under the BuildStream project. Specify
 `--workspace-dir` to change that location. Workspaces remain open for review.
 
@@ -61,9 +61,25 @@ python bst_comment_cleaner.py --project /path/to/project \
 Add `--target app.bst --select` to check selected workspaces as well. Add
 `--apply` to remove matching comments.
 
+### Check local descriptors for a target's dependencies
+
+Use `--scan-project-deps` with `--target` to check the local `.bst` descriptors
+of its build and runtime dependencies at every depth. This mode opens no
+workspaces. It checks descriptors even when they have no sources and reports
+dependencies whose descriptors belong to junction projects as skipped.
+
+```bash
+python bst_comment_cleaner.py --project /path/to/project \
+  --target app.bst --scan-project-deps --words badwords.txt
+```
+
+Add `--apply` to remove matching comments. Use `--include-targets` to check
+the root target descriptors too. Use `--select` or repeat `--dependency` to
+narrow the scan to specific descriptors.
+
 ### Select specific dependencies
 
-Use `--select` to list workspace candidates before opening any workspace.
+Use `--select` to list eligible dependencies before checking any files.
 
 ```bash
 python bst_comment_cleaner.py --project /path/to/project \
@@ -72,7 +88,7 @@ python bst_comment_cleaner.py --project /path/to/project \
 
 Enter the numbers of the dependencies you want to check, separated by spaces
 or commas. Type `all` to select every candidate, or press Enter to skip them
-all. Add `--apply` to remove matches in the selected workspaces.
+all. Add `--apply` to remove matches for the selected dependencies.
 
 For scripted use, repeat `--dependency` to clean only the named elements.
 Use the exact BuildStream element names, including paths under the element

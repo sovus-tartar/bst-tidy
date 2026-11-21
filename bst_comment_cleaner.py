@@ -387,10 +387,17 @@ def element_root(project):
     return root
 
 
-def has_declared_sources(root, element):
+def descriptor_path(root, element):
     path = (root / element).resolve(strict=True)
     if not path.is_relative_to(root):
         raise ValueError("element descriptor is outside element-path")
+    if not path.is_file():
+        raise ValueError("element descriptor must be a file")
+    return path
+
+
+def has_declared_sources(root, element):
+    path = descriptor_path(root, element)
     # Inspect the literal top-level keys before YAML merge or BuildStream includes.
     node = yaml.compose(path.read_bytes(), Loader=yaml.SafeLoader)
     if not isinstance(node, yaml.MappingNode):
@@ -501,8 +508,12 @@ def save(edit):
 def clean_tree(directory, excluded, matches, apply):
     if not directory.is_dir():
         raise ValueError(f"source directory is missing: {directory}")
+    return clean_files(walk(directory, excluded), directory, matches, apply)
+
+
+def clean_files(paths, directory, matches, apply):
     files = removed = errors = 0
-    for path in walk(directory, excluded):
+    for path in paths:
         try:
             data = source_data(path)
             if data is None:
@@ -550,8 +561,11 @@ def arguments():
     parser.add_argument("--bst", default="bst", help="BuildStream executable")
     parser.add_argument("--target", action="append", metavar="ELEMENT.bst",
                         help="root element whose transitive dependencies to clean; repeatable")
-    parser.add_argument("--scan-project", action="store_true",
-                        help="check comments under the project root; works without --target")
+    project_scan = parser.add_mutually_exclusive_group()
+    project_scan.add_argument("--scan-project", action="store_true",
+                              help="check comments under the project root; works without --target")
+    project_scan.add_argument("--scan-project-deps", action="store_true",
+                              help="check only local .bst descriptors in the target's dependency graph")
     selection = parser.add_mutually_exclusive_group()
     selection.add_argument("--dependency", action="append", metavar="ELEMENT.bst",
                            help="clean only this selected dependency; repeatable")
@@ -571,9 +585,11 @@ def arguments():
                       help="require exact capitalization when matching words")
     parser.set_defaults(case_sensitive=False)
     parser.add_argument("--apply", action="store_true", help="write edits; otherwise report matches")
-    parser.add_argument("--step", action="store_true", help="pause before checking each directory")
+    parser.add_argument("--step", action="store_true", help="pause before each workspace or project scan item")
     args = parser.parse_args()
     if not args.target:
+        if args.scan_project_deps:
+            parser.error("--scan-project-deps requires --target")
         if not args.scan_project:
             parser.error("provide --target or --scan-project")
         if args.dependency or args.select or args.include_targets:
@@ -599,9 +615,10 @@ def main():
         project = args.project.resolve(strict=True)
         if not (project / "project.conf").is_file():
             raise ValueError(f"no project.conf in {project}")
-        destination = (project / args.workspace_dir).resolve()
-        if destination == project or project.is_relative_to(destination):
-            raise ValueError("--workspace-dir cannot contain the project directory")
+        if not args.scan_project_deps:
+            destination = (project / args.workspace_dir).resolve()
+            if destination == project or project.is_relative_to(destination):
+                raise ValueError("--workspace-dir cannot contain the project directory")
 
         bst = BuildStream(args.bst, project)
         root = element_root(project) if args.target else project
@@ -613,8 +630,9 @@ def main():
                 names = ", ".join(sorted(missing))
                 raise ValueError(f"elements outside the eligible dependency graph: {names}")
             pipeline = [element for element in pipeline if element in selected]
-        registered = bst.workspaces()
-        excluded = {destination, *registered.values()}
+        if not args.scan_project_deps:
+            registered = bst.workspaces()
+            excluded = {destination, *registered.values()}
     except failures as error:
         print(f"ERROR: {error}", file=sys.stderr)
         return 1
@@ -622,6 +640,12 @@ def main():
     errors = 0
     elements = []
     for element in pipeline:
+        if args.scan_project_deps:
+            if ":" in element:
+                print(f"Skipped {element}: descriptor belongs to a junction project.")
+            else:
+                elements.append(element)
+            continue
         try:
             if element in registered or ":" in element or has_declared_sources(root, element):
                 elements.append(element)
@@ -631,11 +655,12 @@ def main():
             print(f"ERROR {element}: {error}", file=sys.stderr)
             errors += 1
 
+    item = "local .bst descriptor(s)" if args.scan_project_deps else "workspace candidate(s)"
     if args.target:
-        print(f"{len(elements)} workspace candidate(s) from {len(pipeline)} selected element(s).", flush=True)
+        print(f"{len(elements)} {item} from {len(pipeline)} selected element(s).", flush=True)
     if args.select and elements:
         elements = select_elements(elements)
-        print(f"Selected {len(elements)} workspace candidate(s).", flush=True)
+        print(f"Selected {len(elements)} {item}.", flush=True)
     total_files = total_comments = 0
     if args.scan_project:
         print(f"Project root: {project}", flush=True)
@@ -655,21 +680,27 @@ def main():
             if input("Press Enter to proceed, or type q to stop: ").strip().casefold() == "q":
                 return 130
         try:
-            workspace = registered.get(element)
-            if workspace is None:
-                candidate = (destination / (element + ".workspace")).resolve()
-                if not candidate.is_relative_to(destination) or candidate.exists():
-                    raise ValueError(f"workspace destination is occupied or outside its root: {candidate}")
-                workspace = bst.open(element, candidate)
+            if args.scan_project_deps:
+                path = descriptor_path(root, element)
+                if path != root / element:
+                    raise ValueError("element descriptor is symlinked")
+                files, comments, issues = clean_files([path], project, matches, args.apply)
+            else:
+                workspace = registered.get(element)
                 if workspace is None:
-                    print("  Skipped: BuildStream reports that this element has no sources.")
+                    candidate = (destination / (element + ".workspace")).resolve()
+                    if not candidate.is_relative_to(destination) or candidate.exists():
+                        raise ValueError(f"workspace destination is occupied or outside its root: {candidate}")
+                    workspace = bst.open(element, candidate)
+                    if workspace is None:
+                        print("  Skipped: BuildStream reports that this element has no sources.")
+                        continue
+                    excluded.add(workspace)
+                if args.scan_project and workspace == project:
+                    print("  Skipped: this workspace is the project root already checked above.")
                     continue
-                excluded.add(workspace)
-            if args.scan_project and workspace == project:
-                print("  Skipped: this workspace is the project root already checked above.")
-                continue
-            print(f"  Workspace: {workspace}", flush=True)
-            files, comments, issues = clean_tree(workspace, excluded, matches, args.apply)
+                print(f"  Workspace: {workspace}", flush=True)
+                files, comments, issues = clean_tree(workspace, excluded, matches, args.apply)
             total_files += files
             total_comments += comments
             errors += issues
