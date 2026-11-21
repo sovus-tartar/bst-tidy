@@ -45,6 +45,23 @@ registered workspaces and can open missing workspaces. New workspaces default
 to `.bst-comment-workspaces` under the BuildStream project. Specify
 `--workspace-dir` to change that location. Workspaces remain open for review.
 
+### Select specific dependencies
+
+Repeat `--dependency` to clean only the named elements. Use the exact
+BuildStream element names, including paths under the element directory or
+junction prefixes where applicable. Each name must belong to the target's
+dependency graph. Dependencies of the selected elements are cleaned only
+when named explicitly. With `--include-targets`, you can also name a root
+element in the selection.
+
+```bash
+python bst_comment_cleaner.py --project /path/to/project \
+  --target app.bst --dependency libs/crypto.bst --dependency libs/zlib.bst \
+  --words badwords.txt --apply --step
+```
+
+Omit `--dependency` to clean the entire dependency graph.
+
 For local descriptors, the cleaner uses a non-empty top-level `sources:`
 list to identify elements that can open new workspaces. For dependencies in
 junctions, BuildStream determines whether a workspace can be opened.

@@ -454,8 +454,10 @@ def arguments():
     parser.add_argument("--bst", default="bst", help="BuildStream executable")
     parser.add_argument("--target", required=True, action="append", metavar="ELEMENT.bst",
                         help="root element whose transitive dependencies to clean; repeatable")
+    parser.add_argument("--dependency", action="append", metavar="ELEMENT.bst",
+                        help="clean only this selected dependency; repeatable")
     parser.add_argument("--include-targets", action="store_true",
-                        help="clean the root elements as well as their dependencies")
+                        help="make root elements eligible for cleanup")
     parser.add_argument("--workspace-dir", type=Path, default=Path(".bst-comment-workspaces"),
                         help="directory for new workspaces, relative to the project by default")
     parser.add_argument("--words", type=Path, help="UTF-8 file with one word or phrase per line")
@@ -498,6 +500,13 @@ def main():
         root = element_root(project)
         bst = BuildStream(args.bst, project)
         pipeline = bst.dependency_pipeline(args.target, args.include_targets)
+        if args.dependency:
+            selected = set(args.dependency)
+            missing = selected.difference(pipeline)
+            if missing:
+                names = ", ".join(sorted(missing))
+                raise ValueError(f"elements outside the eligible dependency graph: {names}")
+            pipeline = [element for element in pipeline if element in selected]
         registered = bst.workspaces()
         excluded = {destination, *registered.values()}
     except failures as error:
@@ -510,6 +519,8 @@ def main():
         try:
             if element in registered or ":" in element or has_declared_sources(root, element):
                 elements.append(element)
+            elif args.dependency:
+                print(f"Skipped {element}: no non-empty top-level sources list.")
         except (OSError, ValueError, yaml.YAMLError) as error:
             print(f"ERROR {element}: {error}", file=sys.stderr)
             errors += 1
